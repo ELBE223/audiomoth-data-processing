@@ -23,7 +23,7 @@ library(stringr)
 
 # Schritt 2: Definieren der Dateipfade
 # Verwenden Sie hier den Pfad mit file.path für plattformübergreifende Kompatibilität
-base_path <- "/Users/lucasbeseler/Desktop"
+base_path <- "/Users/"
 audiomoth_file <- file.path(base_path, "resultsexcel", "1", "1_BirdNET_selection_by_day.xlsx")
 birdnet_labels_file <- file.path(base_path, "BirdNET_Labels.xlsx")
 species_saxony_file <- file.path(base_path, "Species_Saxony_Anhalt.xlsx")
