@@ -1,3 +1,10 @@
+# BirdNET__Analysis_Single_AudioMoth_File.R
+# Purpose: Analysis of bird species based on data from AudioMoth devices and BirdNET labels across various regions.
+# Author: Lucas Beseler
+# Date: 2024-11-05
+
+
+
 # Step 1: Load the necessary libraries
 # Automatically install missing packages
 required_packages <- c("readxl", "dplyr", "writexl", "lubridate", 
