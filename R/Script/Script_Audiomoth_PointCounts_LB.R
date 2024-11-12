@@ -1335,7 +1335,7 @@ for (i in 1:nrow(shdi_data)) {
 gebiet_data <- data.frame(
   Gebiet = c("A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K"),
   Größe_in_m2 = c(228.903, 198.806, 247.599, 417.740, 34.791, 27.872, 4.466, 6.699, 17.877, 6.699, 17.877),
-  Anzahl_Audiomoth = c(4, 4, 4, 4, 4, 4, 2, 3, 2, 3, 2),
+  Anzahl_Audiomoth = c(4, 4, 4, 4, 4, 4, 4, 4, 2, 3, 2),
   stringsAsFactors = FALSE
 )
 
