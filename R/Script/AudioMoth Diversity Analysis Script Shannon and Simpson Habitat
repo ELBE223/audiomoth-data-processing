@@ -1,0 +1,439 @@
+# ============================
+# AudioMoth Diversity Analysis Script
+# Calculate Shannon and Simpson Habitat Indices for AudioMoth Devices Based on Filtered Invekos Data with 500m Buffer
+# ============================
+
+# ----------------------------
+# Step 1: Install and Load Necessary Packages
+# (Uncomment the install.packages line if packages are not already installed)
+# ----------------------------
+
+# install.packages(c("sf", "tidyverse", "data.table", "stringr", "exactextractr", "purrr", "ggplot2", "viridis"))
+
+library(sf)
+library(tidyverse)      # Includes dplyr, ggplot2, purrr
+library(data.table)
+library(stringr)        # For str_detect and string manipulation
+library(exactextractr)  # For precise raster extraction
+library(purrr)          # For functional programming
+library(ggplot2)        # For plotting
+library(viridis)        # For color scales
+
+# ----------------------------
+# Step 2: Define Logging and Configuration Parameters
+# ----------------------------
+
+# Log function to record messages with timestamps
+log_message <- function(message, log_file) {
+  timestamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+  write(paste(timestamp, "-", message), file = log_file, append = TRUE)
+}
+
+# Configuration parameters 
+# Replace - with correct name and folder
+config <- list(
+  output_folder = "/Users/-/-/Output",
+  log_file = "/Users/-/-/Output/analysis_log.txt",
+  invekos_shapefile = "/Users/-/-/INVEKOS/Antraege2024_gem_25_06_2024.shp",
+  audiomoth_csv = "/Users/-/-/Output/Audiomoth_Locations.csv",
+  diversity_results_csv = "/-/-/Desktop/Output/Audiomoth_Diversity_Indices.csv",
+  diversity_shapefile = "/-/-/Desktop/Output/Audiomoth_Diversity_Indices.shp",
+  shannon_plot = "/-/-/Desktop/Output/Shannon_Diversity_Boxplot_Per_Region.png",
+  simpson_plot = "/-/-/Desktop/Output/Simpson_Diversity_Boxplot_Per_Region.png"
+)
+
+# Ensure that the output folder exists
+if (!dir.exists(config$output_folder)) {
+  dir.create(config$output_folder, recursive = TRUE)
+  log_message("Output folder created.", config$log_file)
+} else {
+  log_message("Output folder already exists.", config$log_file)
+}
+
+# ----------------------------
+# Step 3: Define Functions for Modularization
+# ----------------------------
+
+# Function to load data
+load_data <- function(shapefile_path, csv_path, log_file) {
+  log_message("Loading Invekos Shapefile.", log_file)
+  invekos_data <- tryCatch({
+    st_read(shapefile_path, quiet = FALSE)
+  }, error = function(e) {
+    log_message(paste("Error loading Invekos Shapefile:", e$message), log_file)
+    stop(e)
+  })
+  log_message("Invekos data successfully loaded.", log_file)
+  
+  log_message("Loading AudioMoth Locations CSV.", log_file)
+  audiomoth_dt <- tryCatch({
+    fread(csv_path)
+  }, error = function(e) {
+    log_message(paste("Error loading AudioMoth Locations CSV:", e$message), log_file)
+    stop(e)
+  })
+  log_message("AudioMoth data successfully loaded.", log_file)
+  
+  return(list(invekos = invekos_data, audiomoth = audiomoth_dt))
+}
+
+# Function to preprocess AudioMoth data
+preprocess_audiomoth <- function(audiomoth_dt, log_file) {
+  log_message("Preprocessing AudioMoth data.", log_file)
+  
+  audiomoth_df <- as_tibble(audiomoth_dt) %>%
+    # Safely remove 'geometry' column if it exists
+    select(-any_of("geometry")) %>%
+    # Ensure 'Audiomoth_ID' is character and trimmed
+    mutate(Audiomoth_ID = as.character(Audiomoth_ID)) %>%
+    mutate(Audiomoth_ID = str_trim(Audiomoth_ID))
+  
+  # Check for duplicate Audiomoth_IDs
+  if(any(duplicated(audiomoth_df$Audiomoth_ID))) {
+    log_message("Error: Duplicate Audiomoth_IDs found in AudioMoth data.", log_file)
+    stop("Duplicate Audiomoth_IDs found in AudioMoth data.")
+  } else {
+    log_message("No duplicate Audiomoth_IDs found in AudioMoth data.", log_file)
+  }
+  
+  # Convert to sf object
+  audiomoth_sf <- tryCatch({
+    st_as_sf(audiomoth_df, coords = c("Longitude", "Latitude"), crs = 4326, remove = FALSE)  # WGS 84
+  }, error = function(e) {
+    log_message(paste("Error converting AudioMoth data to sf object:", e$message), log_file)
+    stop(e)
+  })
+  log_message("AudioMoth spatial data successfully created.", log_file)
+  
+  # Check for duplicate Audiomoth_IDs in spatial data
+  if(any(duplicated(audiomoth_sf$Audiomoth_ID))) {
+    log_message("Error: Duplicate Audiomoth_IDs found in AudioMoth sf object.", log_file)
+    stop("Duplicate Audiomoth_IDs found in AudioMoth sf object.")
+  } else {
+    log_message("No duplicate Audiomoth_IDs found in AudioMoth sf object.", log_file)
+  }
+  
+  return(audiomoth_sf)
+}
+
+# Function to classify habitats
+classify_habitat <- function(tf_typ, code_bez) {
+  if (tf_typ %in% c("HNF", "NAF") & code_bez %in% c("Sommerhafer", "Winterweichweizen", "Zuckerrüben", 
+                                                    "Sommergerste", "Winter-Dinkel", "Silomais (als Hauptfutter)", 
+                                                    "Sommerweichweizen", "Sommermenggetreide", "Wintertriticale", 
+                                                    "Mischkulturen")) {
+    return("Arable Land")
+  } else if (tf_typ %in% c("HNF", "NAF") & code_bez %in% c("Mähweiden", "Wiesen", "Weiden und Almen", 
+                                                           "Gras-Leguminosen Gemisch (Leguminosae Predominates)", 
+                                                           "Luzerne-Gras", "Hutungen")) {
+    return("Grassland")
+  } else if (tf_typ == "NNF" & code_bez %in% c("Wildäsungsfläche", "Blühfläche", 
+                                               "Steinobst, z. B. Kirschen, Pflaumen", 
+                                               "Feldgehölze (50 - 2.000m²) CC")) {
+    return("Natural Habitat")
+  } else if (tf_typ == "LE" & code_bez %in% c("Hecken oder Knicks (> 20m) CC", 
+                                              "Baumreihen (> 50m) CC", "Einzelbäume CC", 
+                                              "Dämme und Deiche", "Naturstein- o. Trockenmauern, Lesesteinwälle")) {
+    return("Landscape Element")
+  } else {
+    return(NA)  # Assign NA for further review
+  }
+}
+
+# Function to apply habitat classification
+apply_habitat_classification <- function(invekos_data, log_file) {
+  log_message("Applying habitat classification to Invekos data.", log_file)
+  
+  filtered_data <- invekos_data %>%
+    filter(antragsjah == 2024 & groesse > 0.1) %>%  # Filter for 2024 and exclude very small areas
+    mutate(habitat_category = mapply(classify_habitat, tf_typ, code_bez)) %>%
+    mutate(habitat_category = ifelse(is.na(habitat_category), "Unused/Marginal Land", habitat_category))
+  
+  # Check habitat categories
+  log_message("Habitat categories assigned.", log_file)
+  print(table(filtered_data$habitat_category))
+  
+  # Summarize areas by habitat category
+  category_area_summary <- filtered_data %>%
+    group_by(habitat_category) %>%
+    summarise(total_groesse = sum(groesse, na.rm = TRUE)) %>%
+    arrange(desc(total_groesse))
+  
+  print(category_area_summary)
+  log_message("Areas summarized by habitat category.", log_file)
+  
+  return(filtered_data)
+}
+
+# Function to transform CRS
+transform_crs <- function(audiomoth_sf, invekos_data, log_file) {
+  log_message("Transforming CRS for accurate distance calculations.", log_file)
+  
+  # Check CRS
+  crs_invekos <- st_crs(invekos_data)
+  crs_audiomoth <- st_crs(audiomoth_sf)
+  
+  log_message(paste("CRS Invekos data:", crs_invekos$epsg), log_file)
+  log_message(paste("CRS AudioMoth data:", crs_audiomoth$epsg), log_file)
+  
+  # Make geometries valid
+  invekos_data <- st_make_valid(invekos_data)
+  audiomoth_sf <- st_make_valid(audiomoth_sf)
+  
+  # Simplify geometries if necessary
+  # Uncomment the following line if simplification is desired
+  # invekos_data <- st_simplify(invekos_data, dTolerance = 10)
+  
+  # If CRS are different, transform AudioMoth data to CRS of Invekos data
+  if (crs_invekos != crs_audiomoth) {
+    log_message("CRS do not match. Transforming AudioMoth data.", log_file)
+    audiomoth_sf_transformed <- tryCatch({
+      st_transform(audiomoth_sf, crs = crs_invekos)
+    }, error = function(e) {
+      log_message(paste("Error transforming AudioMoth data CRS:", e$message), log_file)
+      stop(e)
+    })
+    log_message("AudioMoth data transformed to CRS of Invekos data.", log_file)
+  } else {
+    audiomoth_sf_transformed <- audiomoth_sf
+    log_message("CRS of AudioMoth and Invekos data match. No transformation needed.", log_file)
+  }
+  
+  return(list(audiomoth_sf_transformed = audiomoth_sf_transformed, invekos_data = invekos_data))
+}
+
+# Function to calculate diversity indices
+calculate_diversity_indices <- function(intersection_sf, log_file) {
+  log_message("Calculating Shannon and Simpson Diversity Indices.", log_file)
+  
+  diversity_results <- intersection_sf %>%
+    st_set_geometry(NULL) %>%  # Remove geometry for calculation
+    group_by(Audiomoth_ID) %>%
+    summarise(
+      Shannon_Index = -sum((groesse / sum(groesse, na.rm = TRUE)) * log(groesse / sum(groesse, na.rm = TRUE)), na.rm = TRUE),
+      Simpson_Index = 1 - sum((groesse / sum(groesse, na.rm = TRUE))^2, na.rm = TRUE)
+    ) %>%
+    ungroup()
+  
+  log_message("Diversity Indices calculated.", log_file)
+  
+  return(diversity_results)
+}
+
+# Function to handle AudioMoth devices with no intersecting Invekos data
+handle_no_intersection <- function(audiomoth_ids, diversity_results, log_file) {
+  log_message("Handling AudioMoth devices with no intersecting Invekos data.", log_file)
+  
+  diversity_complete <- data.frame(Audiomoth_ID = audiomoth_ids) %>%
+    left_join(diversity_results, by = "Audiomoth_ID")
+  
+  # Check for NA values
+  na_count <- sum(is.na(diversity_complete$Shannon_Index) | is.na(diversity_complete$Simpson_Index))
+  log_message(paste("Number of AudioMoth devices with no intersecting Invekos data:", na_count), log_file)
+  
+  return(diversity_complete)
+}
+
+# Function to save results
+save_results <- function(audiomoth_results, diversity_sf, config, log_file) {
+  log_message("Saving Diversity Indices as CSV.", log_file)
+  tryCatch({
+    fwrite(audiomoth_results, config$diversity_results_csv)
+    log_message("Diversity Indices successfully saved as CSV.", log_file)
+  }, error = function(e) {
+    log_message(paste("Error saving Diversity Indices CSV:", e$message), log_file)
+    stop(e)
+  })
+  
+  log_message("Saving Diversity Indices as sf Shapefile.", log_file)
+  tryCatch({
+    st_write(diversity_sf, 
+             dsn = config$diversity_shapefile, 
+             delete_layer = TRUE)
+    log_message("Diversity Indices successfully saved as sf Shapefile.", log_file)
+  }, error = function(e) {
+    log_message(paste("Error saving Diversity Indices sf Shapefile:", e$message), log_file)
+    stop(e)
+  })
+}
+
+# Function to plot diversity indices
+plot_diversity_indices <- function(audiomoth_results, config, log_file) {
+  log_message("Creating boxplots for Diversity Indices by Region.", log_file)
+  
+  # Calculate mean diversity indices per region
+  region_diversity <- audiomoth_results %>%
+    group_by(Region) %>%
+    summarise(
+      Mean_Shannon = mean(Shannon_Index, na.rm = TRUE),
+      Mean_Simpson = mean(Simpson_Index, na.rm = TRUE),
+      Count = n()
+    )
+  
+  print(region_diversity)
+  
+  # Boxplot for Shannon Diversity Index by Region
+  p1 <- ggplot(audiomoth_results, aes(x = Region, y = Shannon_Index, fill = Region)) +
+    geom_boxplot() +
+    theme_minimal() +
+    labs(
+      title = "Shannon Diversity Index Across Regions",
+      x = "Region",
+      y = "Shannon Diversity Index"
+    ) +
+    theme(
+      legend.position = "none",
+      axis.text.x = element_text(angle = 45, hjust = 1)
+    ) +
+    scale_fill_brewer(palette = "Set3")
+  
+  print(p1)
+  
+  # Boxplot for Simpson Diversity Index by Region
+  p2 <- ggplot(audiomoth_results, aes(x = Region, y = Simpson_Index, fill = Region)) +
+    geom_boxplot() +
+    theme_minimal() +
+    labs(
+      title = "Simpson Diversity Index Across Regions",
+      x = "Region",
+      y = "Simpson Diversity Index"
+    ) +
+    theme(
+      legend.position = "none",
+      axis.text.x = element_text(angle = 45, hjust = 1)
+    ) +
+    scale_fill_brewer(palette = "Set3")
+  
+  print(p2)
+  
+  # Save the plots
+  ggsave(config$shannon_plot, plot = p1, width = 10, height = 6, dpi = 300)
+  ggsave(config$simpson_plot, plot = p2, width = 10, height = 6, dpi = 300)
+  
+  log_message("Boxplots created and saved.", log_file)
+}
+
+# ----------------------------
+# Step 4: Execute the Workflow
+# ----------------------------
+
+# Load data
+data_loaded <- load_data(config$invekos_shapefile, config$audiomoth_csv, config$log_file)
+invekos_data <- data_loaded$invekos
+audiomoth_dt <- data_loaded$audiomoth
+
+# Preprocess AudioMoth data
+audiomoth_sf <- preprocess_audiomoth(audiomoth_dt, config$log_file)
+
+# Apply habitat classification
+filtered_data <- apply_habitat_classification(invekos_data, config$log_file)
+
+# Transform CRS
+crs_transformed <- transform_crs(audiomoth_sf, filtered_data, config$log_file)
+audiomoth_sf_transformed <- crs_transformed$audiomoth_sf_transformed
+invekos_data <- crs_transformed$invekos_data
+
+# Create buffers and perform spatial intersection
+log_message("Starting calculation of Diversity Indices for all Audiomoth devices.", config$log_file)
+
+# Define buffer distance in meters 
+buffer_distance <- 500  # 500 meters
+
+# Create buffers around all Audiomoth points simultaneously
+log_message("Creating 500m buffers around all Audiomoth points.", config$log_file)
+buffers_sf <- st_buffer(audiomoth_sf_transformed, dist = buffer_distance)
+
+# Debugging Step 1: Verify buffers_sf
+log_message("Verifying buffers_sf:", config$log_file)
+print(st_geometry_type(buffers_sf))
+print(nrow(buffers_sf))  # Should be equal to number of AudioMoth devices
+print(unique(buffers_sf$Audiomoth_ID))  # Should list all Audiomoth_IDs
+
+# Perform spatial intersection between buffers and Invekos data
+log_message("Performing spatial intersection between buffers and Invekos data.", config$log_file)
+intersection_sf <- st_intersection(filtered_data, buffers_sf)
+
+# Debugging Step 2: Check intersection_sf
+log_message("Verifying intersection_sf:", config$log_file)
+print(st_geometry_type(intersection_sf))
+print(nrow(intersection_sf))  # Number of intersected features
+print(unique(intersection_sf$Audiomoth_ID))  # Should include multiple Audiomoth_IDs
+
+# Check if Audiomoth_ID is correctly assigned
+if (all(is.na(intersection_sf$Audiomoth_ID))) {
+  log_message("Error: 'Audiomoth_ID' is NA for all intersected features.", config$log_file)
+  stop("'Audiomoth_ID' is NA for all intersected features. Check buffer creation and CRS alignment.")
+} else {
+  log_message("Audiomoth_IDs correctly assigned in intersection_sf.", config$log_file)
+}
+
+# Debugging Step 3: Summary of intersection_sf
+log_message("Summary of intersection_sf:", config$log_file)
+print(table(intersection_sf$Audiomoth_ID))
+
+# Calculate Diversity Indices per Audiomoth_ID
+diversity_results <- calculate_diversity_indices(intersection_sf, config$log_file)
+
+# Debugging Step 4: Check diversity_results
+log_message("Verifying diversity_results:", config$log_file)
+print(head(diversity_results))
+print(nrow(diversity_results))  # Should be <= number of AudioMoth devices
+
+# Handle AudioMoth devices with no intersecting Invekos data
+all_audiomoth_ids <- audiomoth_sf_transformed$Audiomoth_ID
+diversity_complete <- handle_no_intersection(all_audiomoth_ids, diversity_results, config$log_file)
+
+# Combine the results with the original Audiomoth data
+audiomoth_results <- audiomoth_sf_transformed %>%
+  st_set_geometry(NULL) %>%  # Remove geometry for merging
+  left_join(diversity_complete, by = "Audiomoth_ID")
+
+# Check the combined results
+print(head(audiomoth_results))
+log_message("Diversity Indices linked with Audiomoth data.", config$log_file)
+
+# Create an sf object with diversity indices
+diversity_sf <- audiomoth_sf_transformed %>%
+  left_join(diversity_complete, by = "Audiomoth_ID")
+
+# Save results
+save_results(audiomoth_results, diversity_sf, config, config$log_file)
+
+# Plot diversity indices
+plot_diversity_indices(audiomoth_results, config, config$log_file)
+
+# ----------------------------
+# Step 5: End of Analysis
+# ----------------------------
+
+log_message("Analysis completed successfully.", config$log_file)
+
+# End of Script
+
+# ----------------------------
+# Step 6: Further Plots / Correlations
+# ----------------------------
+correlation <- cor(audiomoth_results$Shannon_Index, audiomoth_results$Simpson_Index, method = "pearson")
+print(correlation)
+
+# For Spearman's correlation
+spearman_correlation <- cor(audiomoth_results$Shannon_Index, audiomoth_results$Simpson_Index, method = "spearman")
+print(spearman_correlation)
+
+by_region_correlation <- audiomoth_results %>%
+  group_by(Region) %>%
+  summarise(
+    Pearson_Correlation = cor(Shannon_Index, Simpson_Index, method = "pearson"),
+    Spearman_Correlation = cor(Shannon_Index, Simpson_Index, method = "spearman")
+  )
+print(by_region_correlation)
+
+ggplot(audiomoth_results, aes(x = Shannon_Index, y = Simpson_Index)) +
+  geom_point(aes(color = Region)) +
+  geom_smooth(method = "lm", se = FALSE) +
+  theme_minimal() +
+  labs(
+    title = "Relationship Between Shannon and Simpson Indices",
+    x = "Shannon Index",
+    y = "Simpson Index"
+  )
