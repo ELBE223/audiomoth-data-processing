@@ -1,6 +1,3 @@
-getwd()
-
-
 # ============================
 # Script_Audiomoth_PointCounts_LB
 # Purpose: Analysis of bird species based on data from AudioMoth devices and PointCounts.
